@@ -4,16 +4,8 @@ services:
     runtime: python
     region: oregon
     plan: free
-    buildCommand: |
-      apt-get install -y \
-        libpango-1.0-0 \
-        libpangoft2-1.0-0 \
-        libpangocairo-1.0-0 \
-        libgdk-pixbuf2.0-0 \
-        libcairo2 \
-        libffi-dev \
-        shared-mime-info && \
-      pip install -r requirements.txt
+    pythonVersion: "3.11.9"
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     envVars:
