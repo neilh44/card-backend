@@ -1,94 +1,152 @@
 import uuid
+import json
 import httpx
+from openai import AsyncOpenAI
 from app.config.settings import get_settings
 from app.models.schemas import UserInfo, CardDesign, DesignStyle
 
 settings = get_settings()
+openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 IDEOGRAM_API_URL = "https://api.ideogram.ai/generate"
 
-DESIGN_STYLES = [
-    {
-        "name": "Minimal Elegance",
-        "theme": "minimal",
-        "description": "Clean white background, single gold accent line, generous whitespace, premium feel",
-        "style_prompt": "minimalist white business card, single thin gold accent line, elegant serif typography, lots of white space, premium luxury feel, professional"
-    },
-    {
-        "name": "Dark Executive",
-        "theme": "bold",
-        "description": "Near-black background with metallic gold typography, dramatic and authoritative",
-        "style_prompt": "dark black business card, metallic gold typography, dramatic shadows, executive luxury feel, sophisticated dark background, premium quality"
-    },
-    {
-        "name": "Bold Modern",
-        "theme": "creative",
-        "description": "Vivid colors, strong geometric shapes, contemporary design",
-        "style_prompt": "bold colorful modern business card, vibrant color blocking, strong geometric shapes, contemporary graphic design, eye-catching"
-    },
-    {
-        "name": "Luxury serif",
-        "theme": "elegant",
-        "description": "Deep jewel tones, serif typography, refined and luxurious",
-        "style_prompt": "luxury business card deep jewel tone color, elegant serif font, refined spacing, high-end brand feel, sophisticated layout"
-    },
-    {
-        "name": "Tech Startup",
-        "theme": "tech",
-        "description": "Gradient background, geometric accents, sleek and modern",
-        "style_prompt": "tech startup business card, subtle gradient background, geometric accent shapes, sleek modern sans-serif font, innovative feel"
-    },
-    {
-        "name": "Corporate Classic",
-        "theme": "corporate",
-        "description": "Navy and white, traditional layout, trustworthy and professional",
-        "style_prompt": "corporate professional business card, navy blue and white color scheme, traditional clean layout, trustworthy business feel, classic typography"
-    },
-]
+# ── Step 1: ChatGPT generates 6 tailored Ideogram prompts ────────────────────
+
+GPT_SYSTEM_PROMPT = """You are an expert business card designer and AI image prompt engineer.
+Your job is to create highly detailed, specific Ideogram.ai image generation prompts 
+for professional business card designs.
+
+Each prompt must:
+- Be highly specific about colors, typography style, layout, and visual elements
+- Match the business type and industry
+- Create a photorealistic, print-ready business card
+- Include the exact text to appear on the card
+- Specify landscape orientation and business card dimensions
+- Be unique and visually distinct from the other 5 prompts
+
+Return ONLY a valid JSON object with key "prompts" containing array of exactly 6 objects.
+Each object must have:
+- "prompt": the full Ideogram image generation prompt
+- "design_name": creative name for this design
+- "theme": one of minimal|bold|elegant|tech|creative|corporate
+- "description": one sentence describing the aesthetic"""
+
+GPT_USER_TEMPLATE = """Create 6 unique Ideogram.ai business card design prompts for:
+
+Name: {name}
+Company: {company_name}
+Phone: {phone_number}
+Email: {email}
+Website: {website}
+Address: {address}
+Business Type: {business_description}
+
+The 6 designs must be completely different styles:
+1. Minimal/Clean — white or cream, single accent, lots of space
+2. Dark/Luxury — dark background, gold or silver accents, premium feel  
+3. Bold/Colorful — vivid colors, strong personality, modern
+4. Elegant/Sophisticated — refined, serif typography, jewel tones
+5. Tech/Modern — gradients, geometric shapes, innovative feel
+6. Corporate/Professional — classic, trustworthy, traditional
+
+For each prompt:
+- Specify exact colors (hex or descriptive)
+- Describe typography style (serif/sans-serif, weight, size hierarchy)
+- Describe layout (where name, company, contact info are positioned)
+- Include all contact details that should appear on the card
+- Mention photorealistic, print-ready, high resolution, 300dpi
+- End with: "landscape orientation, standard business card 3.5x2 inches, isolated on clean background"
+
+Make prompts industry-appropriate for: {business_description}"""
 
 
-def _build_ideogram_prompt(user_info: UserInfo, style: dict) -> str:
-    return f"""Professional business card design for {user_info.name}, {user_info.company_name}.
-Style: {style['style_prompt']}.
-Include text: "{user_info.name}", "{user_info.company_name}", "{user_info.phone_number}"{f', "{user_info.email}"' if user_info.email else ''}{f', "{user_info.website}"' if user_info.website else ''}, "{user_info.address}".
-Landscape orientation, standard business card dimensions 3.5x2 inches, photorealistic print-ready design, high resolution, no extra elements outside card borders."""
+async def _generate_prompts_with_gpt(user_info: UserInfo) -> list[dict]:
+    """Use ChatGPT to generate 6 tailored Ideogram prompts."""
+    user_message = GPT_USER_TEMPLATE.format(
+        name=user_info.name,
+        company_name=user_info.company_name,
+        phone_number=user_info.phone_number,
+        email=user_info.email or "N/A",
+        website=user_info.website or "N/A",
+        address=user_info.address,
+        business_description=user_info.business_description,
+    )
 
+    response = await openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": GPT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0.9,
+        response_format={"type": "json_object"},
+    )
+
+    data = json.loads(response.choices[0].message.content)
+    prompts = data.get("prompts", [])
+
+    if not isinstance(prompts, list) or len(prompts) == 0:
+        raise ValueError("GPT did not return valid prompts array")
+
+    return prompts[:6]
+
+
+# ── Step 2: Send each prompt to Ideogram ─────────────────────────────────────
+
+async def _generate_image_with_ideogram(
+    client: httpx.AsyncClient,
+    prompt: str
+) -> str:
+    """Send a single prompt to Ideogram and return the image URL."""
+    response = await client.post(
+        IDEOGRAM_API_URL,
+        headers={
+            "Api-Key": settings.IDEOGRAM_API_KEY,
+            "Content-Type": "application/json",
+        },
+        json={
+            "image_request": {
+                "prompt": prompt,
+                "aspect_ratio": "ASPECT_16_9",
+                "model": "V_2",
+                "magic_prompt_option": "OFF",  # OFF because GPT already wrote the prompt
+                "style_type": "REALISTIC",
+            }
+        },
+        timeout=60.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["data"][0]["url"]
+
+
+# ── Main function ─────────────────────────────────────────────────────────────
 
 async def generate_designs(user_info: UserInfo) -> list[CardDesign]:
-    """Generate 6 business card designs using Ideogram.ai image generation."""
+    """
+    Two-step generation:
+    1. ChatGPT writes 6 tailored Ideogram prompts based on user business info
+    2. Ideogram generates 6 photorealistic business card images
+    """
+
+    # Step 1: Get prompts from ChatGPT
+    print(f"Generating prompts with ChatGPT for: {user_info.name}")
+    prompt_configs = await _generate_prompts_with_gpt(user_info)
+    print(f"Got {len(prompt_configs)} prompts from ChatGPT")
+
+    # Step 2: Generate images with Ideogram
     designs = []
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for style in DESIGN_STYLES:
+    async with httpx.AsyncClient() as client:
+        for i, config in enumerate(prompt_configs):
             try:
-                prompt = _build_ideogram_prompt(user_info, style)
-
-                response = await client.post(
-                    IDEOGRAM_API_URL,
-                    headers={
-                        "Api-Key": settings.IDEOGRAM_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "image_request": {
-                            "prompt": prompt,
-                            "aspect_ratio": "ASPECT_16_9",
-                            "model": "V_2",
-                            "magic_prompt_option": "AUTO",
-                            "style_type": "REALISTIC"
-                        }
-                    }
+                print(f"Generating Ideogram image {i+1}/6: {config.get('design_name')}")
+                image_url = await _generate_image_with_ideogram(
+                    client,
+                    config["prompt"]
                 )
 
-                response.raise_for_status()
-                data = response.json()
-
-                image_url = data["data"][0]["url"]
-                design_id = str(uuid.uuid4())
-
-                # Build a minimal DesignStyle for compatibility
                 design_style = DesignStyle(
-                    theme=style["theme"],
+                    theme=config.get("theme", "minimal"),
                     primary_color="#000000",
                     secondary_color="#666666",
                     accent_color="#c9a84c",
@@ -96,22 +154,24 @@ async def generate_designs(user_info: UserInfo) -> list[CardDesign]:
                     text_color="#000000",
                     font_family="Georgia",
                     layout="classic",
-                    design_name=style["name"],
-                    description=style["description"],
+                    design_name=config.get("design_name", f"Design {i+1}"),
+                    description=config.get("description", ""),
                 )
 
-                # html_content now holds the image URL for frontend rendering
                 designs.append(CardDesign(
-                    id=design_id,
+                    id=str(uuid.uuid4()),
                     style=design_style,
-                    html_content=image_url,   # ← image URL instead of HTML
+                    html_content=image_url,
                 ))
 
+                print(f"✓ Design {i+1} generated successfully")
+
             except Exception as e:
-                print(f"Ideogram generation failed for style {style['name']}: {e}")
+                print(f"✗ Failed to generate design {i+1}: {e}")
                 continue
 
     if len(designs) == 0:
-        raise ValueError("All Ideogram generations failed")
+        raise ValueError("All design generations failed")
 
+    print(f"Successfully generated {len(designs)} designs")
     return designs
