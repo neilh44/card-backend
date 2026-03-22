@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: cardcraft-backend
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: |
+      apt-get install -y \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libpangocairo-1.0-0 \
+        libgdk-pixbuf2.0-0 \
+        libcairo2 \
+        libffi-dev \
+        shared-mime-info && \
+      pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: card-pdfs
+      - key: PDF_OUTPUT_DIR
+        value: /tmp/cardcraft_pdfs
+      - key: ALLOWED_ORIGINS
+        value: '["https://designspark-cards.onrender.com"]'
+      - key: DEBUG
+        value: "false"
