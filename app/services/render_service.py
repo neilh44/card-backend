@@ -89,13 +89,3 @@ async def generate_pdf(image_url: str, order_id: str) -> str:
 
     filepath.write_bytes(pdf_bytes)
     return str(filepath)
-```
-
----
-
-## Step 3 — Add Ideogram Key to Render
-
-Go to **Render → card-backend → Environment → Add**:
-```
-Key:   IDEOGRAM_API_KEY
-Value: your-ideogram-api-key-here
