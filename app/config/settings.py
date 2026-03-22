@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     OPENAI_API_KEY: str
+    IDEOGRAM_API_KEY: str        # ← ADD THIS
 
     SUPABASE_URL: str
     SUPABASE_SERVICE_ROLE_KEY: str
