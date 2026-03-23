@@ -11,18 +11,19 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 async def create_order(payload: CreateOrderRequest):
     """
     Create a print-ready order:
-    1. Render PDF from selected design HTML
-    2. Upload PDF to Supabase Storage
-    3. Save order record to database
-    Returns order details including the PDF download URL.
+    1. Clean HTML content
+    2. Render PDF from selected design HTML
+    3. Upload PDF to Supabase Storage
+    4. Save order record to database
     """
     order_id = str(uuid.uuid4())
 
+    # Clean the HTML — strip leading/trailing whitespace and newlines
+    clean_html = payload.design_html.strip()
+
     # Step 1: Generate PDF
     try:
-        local_pdf_path = await render_service.generate_pdf(
-            payload.design_html, order_id
-        )
+        local_pdf_path = await render_service.generate_pdf(clean_html, order_id)
     except Exception as e:
         raise HTTPException(
             status_code=500,
