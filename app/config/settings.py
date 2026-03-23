@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     OPENAI_API_KEY: str
-    IDEOGRAM_API_KEY: str        # ← ADD THIS
+    IDEOGRAM_API_KEY: str
 
     SUPABASE_URL: str
     SUPABASE_SERVICE_ROLE_KEY: str
@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     PDF_OUTPUT_DIR: str = "/tmp/cardcraft_pdfs"
     SUPABASE_STORAGE_BUCKET: str = "card-pdfs"
+    PDF_RENDERER: str = "playwright"
 
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000"]
 
