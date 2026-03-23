@@ -1,12 +1,40 @@
 import asyncio
 import os
+import subprocess
 from pathlib import Path
 from app.config.settings import get_settings
 
 settings = get_settings()
 
-# Set Playwright browser path explicitly for Render environment
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
+
+def _ensure_chromium_installed():
+    """Install Chromium if not present — handles Render ephemeral filesystem."""
+    chromium_path = Path("/opt/render/.cache/ms-playwright")
+    
+    # Check if chromium executable exists
+    chrome_exe = list(chromium_path.glob("**/chrome-linux/chrome"))
+    
+    if not chrome_exe:
+        print("Chromium not found — installing now...")
+        try:
+            subprocess.run(
+                ["python", "-m", "playwright", "install", "chromium"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["python", "-m", "playwright", "install-deps", "chromium"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print("✓ Chromium installed successfully")
+        except subprocess.CalledProcessError as e:
+            print(f"✗ Chromium install failed: {e.stderr}")
+            raise RuntimeError(f"Could not install Chromium: {e.stderr}")
+    else:
+        print(f"✓ Chromium found at {chrome_exe[0]}")
 
 
 def _ensure_output_dir() -> Path:
@@ -17,6 +45,9 @@ def _ensure_output_dir() -> Path:
 
 def _render_pdf_sync(html_content: str) -> bytes:
     """Render HTML to PDF using Playwright headless Chromium."""
+    # Ensure Chromium is available before launching
+    _ensure_chromium_installed()
+
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -30,11 +61,7 @@ def _render_pdf_sync(html_content: str) -> bytes:
             ]
         )
         page = browser.new_page()
-
-        # Set viewport to exact business card size at 96dpi
         page.set_viewport_size({"width": 336, "height": 192})
-
-        # Load HTML and wait for fonts
         page.set_content(html_content, wait_until="networkidle")
         page.wait_for_timeout(2500)
 
@@ -50,11 +77,7 @@ def _render_pdf_sync(html_content: str) -> bytes:
 
 
 async def generate_pdf(html_content: str, order_id: str) -> str:
-    """
-    Generate print-ready PDF using Playwright headless Chromium.
-    Renders exactly as seen in browser — full CSS support.
-    Returns local file path.
-    """
+    """Generate print-ready PDF. Auto-installs Chromium if wiped by Render."""
     output_dir = _ensure_output_dir()
     filepath = output_dir / f"{order_id}.pdf"
 
