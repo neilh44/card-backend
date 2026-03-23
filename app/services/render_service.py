@@ -1,8 +1,12 @@
 import asyncio
+import os
 from pathlib import Path
 from app.config.settings import get_settings
 
 settings = get_settings()
+
+# Set Playwright browser path explicitly for Render environment
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
 
 
 def _ensure_output_dir() -> Path:
@@ -21,15 +25,18 @@ def _render_pdf_sync(html_content: str) -> bytes:
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
             ]
         )
         page = browser.new_page()
 
-        # Load HTML content directly
-        page.set_content(html_content, wait_until="networkidle")
+        # Set viewport to exact business card size at 96dpi
+        page.set_viewport_size({"width": 336, "height": 192})
 
-        # Wait for fonts to load
-        page.wait_for_timeout(2000)
+        # Load HTML and wait for fonts
+        page.set_content(html_content, wait_until="networkidle")
+        page.wait_for_timeout(2500)
 
         pdf_bytes = page.pdf(
             width="3.5in",
