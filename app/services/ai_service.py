@@ -1,514 +1,661 @@
 import uuid
+import json
+import httpx
+import asyncio
+from openai import AsyncOpenAI
+from app.config.settings import get_settings
 from app.models.schemas import UserInfo, CardDesign, DesignStyle
 
+settings = get_settings()
+openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+IDEOGRAM_API_URL = "https://api.ideogram.ai/generate"
 
-def _render_html(user_info: UserInfo, style: dict) -> str:
-    """Render a complete self-contained business card HTML."""
-    font_import = f'@import url("{style["font_url"]}");' if style.get("font_url") else ""
-    email = f'<div class="contact-item">{user_info.email}</div>' if user_info.email else ""
-    website = f'<div class="contact-item">{user_info.website}</div>' if user_info.website else ""
-    body = style["render"](user_info, style)
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1 — IDEOGRAM: Abstract style inspiration images (NO text)
+# ─────────────────────────────────────────────────────────────────────────────
+
+STYLE_PROMPTS = [
+    {
+        "name": "Minimal Gold",
+        "theme": "minimal",
+        "description": "Off-white with single gold divider, Swiss precision",
+        "prompt": (
+            "Abstract minimalist business card layout design, pure flat graphic artwork. "
+            "Off-white background #F5F4F0, single thin horizontal gold line #C9A84C "
+            "dividing the canvas at the exact vertical midpoint. "
+            "Upper half clean empty warm off-white space. "
+            "Lower half clean empty space. "
+            "No text, no words, no letters, no numbers anywhere. "
+            "Swiss design school precision, generous whitespace, luxury stationery feel. "
+            "Flat vector graphic, fills entire frame edge to edge, "
+            "landscape 3.5x2 inch proportions, top-down view, zero perspective."
+        ),
+    },
+    {
+        "name": "Dark Executive",
+        "theme": "bold",
+        "description": "Matte black with gold border frame, luxury executive",
+        "prompt": (
+            "Abstract luxury executive business card layout design, pure flat graphic artwork. "
+            "Deep matte black background #0A0A0A. "
+            "Thin elegant gold rectangular border frame #C9A84C inset 3mm from all edges. "
+            "Inner thin gold border 2px inside the first. "
+            "Single thin gold horizontal rule at vertical midpoint inside the frame. "
+            "No text, no words, no letters, no numbers anywhere. "
+            "Premium luxury feel, private banking aesthetic. "
+            "Flat vector graphic, fills entire frame edge to edge, "
+            "landscape 3.5x2 inch proportions, top-down view, zero perspective."
+        ),
+    },
+    {
+        "name": "Navy Corporate",
+        "theme": "corporate",
+        "description": "Deep navy with gold left bar, authoritative professional",
+        "prompt": (
+            "Abstract corporate business card layout design, pure flat graphic artwork. "
+            "Deep navy background #0D2144. "
+            "Solid gold vertical stripe #C9A84C on far left, 6mm wide, full card height. "
+            "Thin white horizontal rule at 50 percent card height on the right content area. "
+            "No text, no words, no letters, no numbers anywhere. "
+            "Professional authoritative feel, Fortune 500 aesthetic. "
+            "Flat vector graphic, fills entire frame edge to edge, "
+            "landscape 3.5x2 inch proportions, top-down view, zero perspective."
+        ),
+    },
+    {
+        "name": "Cream Luxury",
+        "theme": "elegant",
+        "description": "Warm cream with burgundy border and gold corner ornaments",
+        "prompt": (
+            "Abstract elegant luxury business card layout design, pure flat graphic artwork. "
+            "Warm cream background #F4EFE4. "
+            "Thin burgundy rectangular border frame #6B1E2E inset 4mm from all edges. "
+            "Small decorative corner ornaments in gold #C9A84C at all four corners. "
+            "Thin burgundy horizontal rule at vertical midpoint. "
+            "Small gold diamond ornament centered on the rule. "
+            "No text, no words, no letters, no numbers anywhere. "
+            "Old-world European luxury, Hermes Paris aesthetic. "
+            "Flat vector graphic, fills entire frame edge to edge, "
+            "landscape 3.5x2 inch proportions, top-down view, zero perspective."
+        ),
+    },
+    {
+        "name": "Tech Slate",
+        "theme": "tech",
+        "description": "Dark slate with electric blue accent stripe, tech energy",
+        "prompt": (
+            "Abstract modern tech business card layout design, pure flat graphic artwork. "
+            "Dark slate background #1A1F2E. "
+            "Solid electric blue vertical stripe #4F8EF7 on far left, 5mm wide, full card height. "
+            "Thin electric blue horizontal rule at 45 percent card height. "
+            "Large faint circle outline in white at 5 percent opacity bottom-right partially cropped. "
+            "No text, no words, no letters, no numbers anywhere. "
+            "Modern tech startup feel, Stripe or Linear aesthetic. "
+            "Flat vector graphic, fills entire frame edge to edge, "
+            "landscape 3.5x2 inch proportions, top-down view, zero perspective."
+        ),
+    },
+    {
+        "name": "Bold Split",
+        "theme": "creative",
+        "description": "White and coral color-block split, bold creative energy",
+        "prompt": (
+            "Abstract bold modern business card layout design, pure flat graphic artwork. "
+            "Top exactly 50 percent pure white #FFFFFF. "
+            "Bottom exactly 50 percent deep coral #D95F43. "
+            "Perfectly sharp straight hard horizontal line at exact vertical midpoint, no blur, no gradient. "
+            "Subtle white geometric quarter circle at 12 percent opacity bottom-right corner. "
+            "No text, no words, no letters, no numbers anywhere. "
+            "Bold creative agency aesthetic, Pentagram design studio feel. "
+            "Flat vector graphic, fills entire frame edge to edge, "
+            "landscape 3.5x2 inch proportions, top-down view, zero perspective."
+        ),
+    },
+]
+
+IDEOGRAM_NEGATIVE = (
+    "text, letters, words, numbers, typography, font characters, "
+    "name, address, phone, email, website, label, title, heading, "
+    "background surface, table, environment, grey background, "
+    "shadow, 3D perspective, angled view, tilted, "
+    "multiple cards, stacked cards, hands, props, objects, "
+    "portrait orientation, square format, photo, photography"
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 — GPT VISION: Extract color palette and mood from Ideogram image
+# ─────────────────────────────────────────────────────────────────────────────
+
+GPT_VISION_SYSTEM = """You are a professional color analyst and brand strategist.
+Analyze the business card design image and extract its exact color palette and mood.
+Return ONLY valid JSON, no markdown, no explanation."""
+
+GPT_VISION_USER = """Analyze this business card design image carefully.
+Extract the exact colors used and describe the mood/feel.
+
+Return a JSON object with exactly this structure:
+{
+  "background_color": "#hexcode",
+  "primary_text_color": "#hexcode",
+  "secondary_text_color": "#hexcode",
+  "accent_color": "#hexcode",
+  "decorative_colors": ["#hexcode1", "#hexcode2"],
+  "mood": "one paragraph describing the visual mood, feel, and aesthetic of this design",
+  "style_keywords": ["keyword1", "keyword2", "keyword3"],
+  "has_dark_background": true or false,
+  "has_left_bar": true or false,
+  "left_bar_color": "#hexcode or null",
+  "left_bar_width_px": 0,
+  "has_horizontal_rule": true or false,
+  "rule_color": "#hexcode or null",
+  "rule_position_percent": 50,
+  "has_border_frame": true or false,
+  "border_color": "#hexcode or null",
+  "has_corner_ornaments": true or false,
+  "has_color_split": true or false,
+  "split_top_color": "#hexcode or null",
+  "split_bottom_color": "#hexcode or null",
+  "has_circle_decoration": true or false,
+  "circle_color": "#hexcode or null"
+}"""
+
+
+async def _extract_colors_with_vision(image_url: str) -> dict:
+    """GPT-4 Vision: analyze Ideogram image and extract color palette + mood."""
+    response = await openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": GPT_VISION_SYSTEM},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url, "detail": "high"},
+                    },
+                    {"type": "text", "text": GPT_VISION_USER},
+                ],
+            },
+        ],
+        max_tokens=800,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 — GPT-4O: Generate complete layout system from color data + user info
+# ─────────────────────────────────────────────────────────────────────────────
+
+GPT_LAYOUT_SYSTEM = """You are a world-class typographic layout designer specializing in 
+luxury business card design. You receive color palette data and user information, 
+and you produce a precise, complete HTML/CSS layout specification.
+Return ONLY valid JSON, no markdown, no explanation."""
+
+GPT_LAYOUT_USER = """You are designing a premium business card.
+
+COLOR PALETTE FROM STYLE ANALYSIS:
+{color_data}
+
+USER INFORMATION TO DISPLAY:
+- Name: {name}
+- Company: {company}
+- Phone: {phone}
+- Email: {email}
+- Website: {website}
+- Address: {address}
+
+DESIGN MOOD: {mood}
+STYLE KEYWORDS: {keywords}
+
+Based on the color palette and mood, design a complete layout system for this business card.
+The card is exactly 3.5 inches wide by 2 inches tall (336px x 192px at 96dpi).
+
+Return a JSON object with exactly this structure:
+{{
+  "layout_name": "descriptive name",
+  "background_color": "#hexcode",
+  "background_style": "solid|gradient description",
+
+  "name_section": {{
+    "top_in": 0.18,
+    "left_in": 0.22,
+    "font_family": "Playfair Display|DM Sans",
+    "font_size_px": 26,
+    "font_weight": "700",
+    "color": "#hexcode",
+    "letter_spacing": "-0.3px",
+    "line_height": "1.15",
+    "text_transform": "none|uppercase"
+  }},
+
+  "company_section": {{
+    "margin_top_px": 5,
+    "font_family": "DM Sans",
+    "font_size_px": 8,
+    "font_weight": "500",
+    "color": "#hexcode",
+    "letter_spacing": "0.18em",
+    "text_transform": "uppercase|none"
+  }},
+
+  "contact_section": {{
+    "bottom_in": 0.18,
+    "left_in": 0.22,
+    "align": "left|center",
+    "font_family": "DM Sans",
+    "font_size_px": 7,
+    "font_weight": "400",
+    "color": "#hexcode",
+    "line_height": "1.8"
+  }},
+
+  "decorative_elements": [
+    {{
+      "type": "horizontal_rule|vertical_bar|border_frame|corner_ornaments|color_split|circle",
+      "color": "#hexcode",
+      "opacity": 1.0,
+      "spec": {{}}
+    }}
+  ],
+
+  "content_left_offset_in": 0.0,
+  "google_fonts_url": "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@300;400;500;600;700&display=swap"
+}}
+
+LAYOUT RULES:
+- If has_left_bar is true: set content_left_offset_in to 0.12 to clear the bar
+- If has_dark_background: use light/gold text colors
+- If has_color_split: put name/company on top section, contact on bottom section
+- If has_border_frame: keep all content inside the frame with extra padding
+- If has_corner_ornaments: include them as decorative_elements
+- Typography must create clear visual hierarchy: name largest, company medium, contact small
+- All measurements must respect the 3.5in x 2in card boundary
+- Design must look like it came from a premium print studio"""
+
+
+async def _generate_layout_with_gpt4o(
+    user_info: UserInfo,
+    color_data: dict,
+) -> dict:
+    """GPT-4o: generate complete layout system from colors + user info."""
+
+    user_message = GPT_LAYOUT_USER.format(
+        color_data=json.dumps(color_data, indent=2),
+        name=user_info.name,
+        company=user_info.company_name,
+        phone=user_info.phone_number,
+        email=user_info.email or "N/A",
+        website=user_info.website or "N/A",
+        address=user_info.address,
+        mood=color_data.get("mood", "professional and elegant"),
+        keywords=", ".join(color_data.get("style_keywords", [])),
+    )
+
+    response = await openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": GPT_LAYOUT_SYSTEM},
+            {"role": "user", "content": user_message},
+        ],
+        max_tokens=1500,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+
+    return json.loads(response.choices[0].message.content)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4 — HTML RENDERER: Inject text into layout, produce final card HTML
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_decorative_elements(elements: list) -> str:
+    """Convert layout JSON decorative elements to HTML."""
+    html = ""
+    for el in elements:
+        el_type = el.get("type", "")
+        color = el.get("color", "#C9A84C")
+        opacity = el.get("opacity", 1.0)
+        spec = el.get("spec", {})
+
+        if el_type == "horizontal_rule":
+            position = spec.get("position_percent", 50)
+            thickness = spec.get("thickness_px", 1)
+            html += f"""
+<div style="
+    position:absolute; left:0; right:0;
+    top:{position}%; height:{thickness}px;
+    background:{color}; opacity:{opacity};
+    z-index:1;
+"></div>"""
+
+        elif el_type == "vertical_bar":
+            width = spec.get("width_px", 6)
+            html += f"""
+<div style="
+    position:absolute; left:0; top:0; bottom:0;
+    width:{width}px; background:{color}; opacity:{opacity};
+    z-index:1;
+"></div>"""
+
+        elif el_type == "border_frame":
+            inset = spec.get("inset_px", 10)
+            thickness = spec.get("thickness_px", 1)
+            html += f"""
+<div style="
+    position:absolute; inset:{inset}px;
+    border:{thickness}px solid {color}; opacity:{opacity};
+    pointer-events:none; z-index:1;
+"></div>"""
+            # Optional inner frame
+            if spec.get("double_frame"):
+                inner = inset + 3
+                html += f"""
+<div style="
+    position:absolute; inset:{inner}px;
+    border:0.3px solid {color}; opacity:{opacity * 0.4};
+    pointer-events:none; z-index:1;
+"></div>"""
+
+        elif el_type == "corner_ornaments":
+            size = spec.get("size_px", 8)
+            inset = spec.get("inset_px", 14)
+            for pos_css in [
+                f"top:{inset}px;left:{inset}px;border-top:1px solid;border-left:1px solid",
+                f"top:{inset}px;right:{inset}px;border-top:1px solid;border-right:1px solid",
+                f"bottom:{inset}px;left:{inset}px;border-bottom:1px solid;border-left:1px solid",
+                f"bottom:{inset}px;right:{inset}px;border-bottom:1px solid;border-right:1px solid",
+            ]:
+                html += f"""
+<div style="
+    position:absolute; {pos_css};
+    border-color:{color}; opacity:{opacity};
+    width:{size}px; height:{size}px;
+    z-index:1;
+"></div>"""
+
+        elif el_type == "color_split":
+            top_color = spec.get("top_color", "#FFFFFF")
+            bottom_color = spec.get("bottom_color", "#D95F43")
+            split_percent = spec.get("split_percent", 50)
+            html += f"""
+<div style="
+    position:absolute; inset:0; z-index:0;
+    background:linear-gradient(
+        to bottom,
+        {top_color} 0%,
+        {top_color} {split_percent}%,
+        {bottom_color} {split_percent}%,
+        {bottom_color} 100%
+    );
+"></div>"""
+
+        elif el_type == "circle":
+            size = spec.get("size_px", 120)
+            right = spec.get("right_px", -30)
+            bottom = spec.get("bottom_px", -30)
+            html += f"""
+<div style="
+    position:absolute; right:{right}px; bottom:{bottom}px;
+    width:{size}px; height:{size}px; border-radius:50%;
+    border:1px solid {color}; opacity:{opacity};
+    pointer-events:none; z-index:1;
+"></div>"""
+
+        elif el_type == "diamond_ornament":
+            html += f"""
+<div style="
+    position:absolute; left:50%; top:50%;
+    transform:translate(-50%,-50%) rotate(45deg);
+    width:5px; height:5px;
+    background:{color}; opacity:{opacity};
+    z-index:2;
+"></div>"""
+
+    return html
+
+
+def _build_final_html(
+    user_info: UserInfo,
+    layout: dict,
+) -> str:
+    """Render the final business card HTML from layout JSON + user data."""
+
+    bg = layout.get("background_color", "#FFFFFF")
+    fonts_url = layout.get("google_fonts_url",
+        "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@300;400;500;600;700&display=swap"
+    )
+    left_offset = layout.get("content_left_offset_in", 0.0)
+
+    # Name section
+    ns = layout.get("name_section", {})
+    name_top = ns.get("top_in", 0.18)
+    name_left = ns.get("left_in", 0.22) + left_offset
+    name_font = ns.get("font_family", "Playfair Display")
+    name_size = ns.get("font_size_px", 26)
+    name_weight = ns.get("font_weight", "700")
+    name_color = ns.get("color", "#1A1A1A")
+    name_ls = ns.get("letter_spacing", "normal")
+    name_lh = ns.get("line_height", "1.15")
+    name_transform = ns.get("text_transform", "none")
+
+    # Company section
+    cs = layout.get("company_section", {})
+    company_mt = cs.get("margin_top_px", 5)
+    company_font = cs.get("font_family", "DM Sans")
+    company_size = cs.get("font_size_px", 8)
+    company_weight = cs.get("font_weight", "500")
+    company_color = cs.get("color", "#666666")
+    company_ls = cs.get("letter_spacing", "0.1em")
+    company_transform = cs.get("text_transform", "uppercase")
+
+    # Contact section
+    ct = layout.get("contact_section", {})
+    contact_bottom = ct.get("bottom_in", 0.18)
+    contact_left = ct.get("left_in", 0.22) + left_offset
+    contact_align = ct.get("align", "left")
+    contact_font = ct.get("font_family", "DM Sans")
+    contact_size = ct.get("font_size_px", 7)
+    contact_weight = ct.get("font_weight", "400")
+    contact_color = ct.get("color", "#6B6B6B")
+    contact_lh = ct.get("line_height", "1.8")
+
+    # Contact positioning
+    if contact_align == "center":
+        contact_pos_css = f"left:0; right:0; bottom:{contact_bottom}in; text-align:center;"
+    else:
+        contact_pos_css = f"left:{contact_left}in; bottom:{contact_bottom}in;"
+
+    # Decorative elements
+    deco_html = _render_decorative_elements(
+        layout.get("decorative_elements", [])
+    )
+
+    # Contact lines
+    email_line = f"<div>{user_info.email}</div>" if user_info.email else ""
+    website_line = f"<div>{user_info.website}</div>" if user_info.website else ""
 
     return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="{fonts_url}" rel="stylesheet">
 <style>
-{font_import}
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
 html, body {{
-  width: 3.5in;
-  height: 2in;
-  overflow: hidden;
-  font-family: {style['font_family']};
+    width: 3.5in;
+    height: 2in;
+    overflow: hidden;
+    position: relative;
+    background: {bg};
 }}
 </style>
 </head>
-<body>{body}</body>
+<body>
+
+<!-- Layer 0: Decorative elements -->
+{deco_html}
+
+<!-- Layer 1: Name + Company -->
+<div style="
+    position: absolute;
+    top: {name_top}in;
+    left: {name_left}in;
+    z-index: 10;
+    max-width: 2.8in;
+">
+    <div style="
+        font-family: '{name_font}', Georgia, serif;
+        font-size: {name_size}px;
+        font-weight: {name_weight};
+        color: {name_color};
+        letter-spacing: {name_ls};
+        line-height: {name_lh};
+        text-transform: {name_transform};
+    ">{user_info.name}</div>
+
+    <div style="
+        font-family: '{company_font}', Arial, sans-serif;
+        font-size: {company_size}px;
+        font-weight: {company_weight};
+        color: {company_color};
+        letter-spacing: {company_ls};
+        text-transform: {company_transform};
+        margin-top: {company_mt}px;
+    ">{user_info.company_name}</div>
+</div>
+
+<!-- Layer 2: Contact Details -->
+<div style="
+    position: absolute;
+    {contact_pos_css}
+    z-index: 10;
+    font-family: '{contact_font}', Arial, sans-serif;
+    font-size: {contact_size}px;
+    font-weight: {contact_weight};
+    color: {contact_color};
+    line-height: {contact_lh};
+">
+    <div>{user_info.phone_number}</div>
+    {email_line}
+    {website_line}
+    <div>{user_info.address}</div>
+</div>
+
+</body>
 </html>"""
 
 
-# ── Layout Renderers ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# IDEOGRAM API CALL
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _render_minimal_gold(u: UserInfo, s: dict) -> str:
-    email = f'<div class="contact-item">{u.email}</div>' if u.email else ""
-    website = f'<div class="contact-item">{u.website}</div>' if u.website else ""
-    return f"""
-<div style="
-  width:3.5in; height:2in;
-  background:#F5F4F0;
-  padding: 0.22in 0.28in;
-  display:flex; flex-direction:column;
-  justify-content:space-between;
-  position:relative;
-">
-  <!-- Top: Name + Company -->
-  <div>
-    <div style="
-      font-family:'Playfair Display',Georgia,serif;
-      font-size:28px; font-weight:700;
-      color:#1A1A1A; letter-spacing:-0.3px;
-      line-height:1.15;
-    ">{u.name}</div>
-    <div style="
-      font-family:'DM Sans',Arial,sans-serif;
-      font-size:8.5px; font-weight:500;
-      color:#8A8A8A; letter-spacing:0.18em;
-      text-transform:uppercase; margin-top:6px;
-    ">{u.company_name}</div>
-  </div>
-
-  <!-- Gold Divider -->
-  <div style="
-    position:absolute; left:0; right:0;
-    top:50%; height:0.7px;
-    background:linear-gradient(90deg, transparent 0%, #C9A84C 8%, #C9A84C 92%, transparent 100%);
-  "></div>
-
-  <!-- Bottom: Contact -->
-  <div style="
-    font-family:'DM Sans',Arial,sans-serif;
-    font-size:7.5px; color:#6B6B6B;
-    line-height:1.75;
-  ">
-    <div>{u.phone_number}</div>
-    {email}
-    {website}
-    <div>{u.address}</div>
-  </div>
-</div>"""
+async def _generate_ideogram_style(
+    client: httpx.AsyncClient,
+    prompt: str,
+) -> str:
+    """Generate abstract style inspiration image. Returns image URL."""
+    response = await client.post(
+        IDEOGRAM_API_URL,
+        headers={
+            "Api-Key": settings.IDEOGRAM_API_KEY,
+            "Content-Type": "application/json",
+        },
+        json={
+            "image_request": {
+                "prompt": prompt,
+                "negative_prompt": IDEOGRAM_NEGATIVE,
+                "aspect_ratio": "ASPECT_3_2",
+                "model": "V_2",
+                "magic_prompt_option": "OFF",
+                "style_type": "DESIGN",
+            }
+        },
+        timeout=90.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["data"][0]["url"]
 
 
-def _render_dark_executive(u: UserInfo, s: dict) -> str:
-    email = f'<div style="margin-top:3px">{u.email}</div>' if u.email else ""
-    website = f'<div style="margin-top:3px">{u.website}</div>' if u.website else ""
-    return f"""
-<div style="
-  width:3.5in; height:2in;
-  background:#0A0A0A;
-  position:relative; overflow:hidden;
-">
-  <!-- Gold border frame -->
-  <div style="
-    position:absolute; inset:10px;
-    border:0.6px solid #C9A84C;
-    pointer-events:none; z-index:1;
-  "></div>
-  <div style="
-    position:absolute; inset:13px;
-    border:0.3px solid rgba(201,168,76,0.3);
-    pointer-events:none; z-index:1;
-  "></div>
-
-  <!-- Content -->
-  <div style="
-    position:absolute; inset:0;
-    padding:0.2in 0.22in 0.18in;
-    display:flex; flex-direction:column;
-    justify-content:space-between; z-index:2;
-  ">
-    <!-- Top -->
-    <div>
-      <div style="
-        font-family:'DM Sans',Arial,sans-serif;
-        font-size:7px; font-weight:500;
-        color:#C9A84C; letter-spacing:0.22em;
-        text-transform:uppercase;
-      ">{u.company_name}</div>
-      <div style="
-        width:100%; height:0.5px;
-        background:#C9A84C; opacity:0.5;
-        margin:8px 0;
-      "></div>
-      <div style="
-        font-family:'Playfair Display',Georgia,serif;
-        font-size:22px; font-weight:700;
-        color:#C9A84C; letter-spacing:0.03em;
-        line-height:1.2;
-      ">{u.name}</div>
-    </div>
-
-    <!-- Bottom -->
-    <div>
-      <div style="
-        width:100%; height:0.5px;
-        background:#C9A84C; opacity:0.4;
-        margin-bottom:10px;
-      "></div>
-      <div style="
-        font-family:'DM Sans',Arial,sans-serif;
-        font-size:7px; color:#D4AF6A;
-        line-height:1.8;
-      ">
-        <div>{u.phone_number}</div>
-        {email}
-        {website}
-        <div>{u.address}</div>
-      </div>
-    </div>
-  </div>
-</div>"""
-
-
-def _render_navy_corporate(u: UserInfo, s: dict) -> str:
-    email = f'<div style="margin-top:3px">{u.email}</div>' if u.email else ""
-    website = f'<div style="margin-top:3px">{u.website}</div>' if u.website else ""
-    return f"""
-<div style="
-  width:3.5in; height:2in;
-  background:#0D2144;
-  display:flex; overflow:hidden;
-  position:relative;
-">
-  <!-- Gold left bar -->
-  <div style="width:7px; background:#C9A84C; flex-shrink:0; height:100%;"></div>
-
-  <!-- Content -->
-  <div style="
-    flex:1; padding:0.2in 0.2in 0.18in 0.18in;
-    display:flex; flex-direction:column;
-    justify-content:space-between;
-  ">
-    <!-- Name + Company -->
-    <div>
-      <div style="
-        font-family:'Playfair Display',Georgia,serif;
-        font-size:22px; font-weight:700;
-        color:#C9A84C; line-height:1.2;
-      ">{u.name}</div>
-      <div style="
-        font-family:'DM Sans',Arial,sans-serif;
-        font-size:8px; font-weight:500;
-        color:#FFFFFF; letter-spacing:0.14em;
-        text-transform:uppercase; margin-top:5px;
-      ">{u.company_name}</div>
-    </div>
-
-    <!-- Divider -->
-    <div style="height:0.5px; background:rgba(255,255,255,0.2); margin:0 0;"></div>
-
-    <!-- Contact -->
-    <div style="
-      font-family:'DM Sans',Arial,sans-serif;
-      font-size:7px; color:rgba(200,215,235,0.85);
-      line-height:1.8;
-    ">
-      <div>· {u.phone_number}</div>
-      {'<div>· ' + u.email + '</div>' if u.email else ''}
-      {'<div>· ' + u.website + '</div>' if u.website else ''}
-      <div>· {u.address}</div>
-    </div>
-  </div>
-</div>"""
-
-
-def _render_cream_luxury(u: UserInfo, s: dict) -> str:
-    email = f'<div>{u.email}</div>' if u.email else ""
-    website = f'<div>{u.website}</div>' if u.website else ""
-    return f"""
-<div style="
-  width:3.5in; height:2in;
-  background:#F4EFE4;
-  position:relative; overflow:hidden;
-">
-  <!-- Decorative border -->
-  <div style="
-    position:absolute; inset:8px;
-    border:0.8px solid #6B1E2E;
-    pointer-events:none;
-  "></div>
-  <!-- Corner ornaments -->
-  <div style="position:absolute;top:14px;left:14px;width:8px;height:8px;border-top:1px solid #C9A84C;border-left:1px solid #C9A84C;"></div>
-  <div style="position:absolute;top:14px;right:14px;width:8px;height:8px;border-top:1px solid #C9A84C;border-right:1px solid #C9A84C;"></div>
-  <div style="position:absolute;bottom:14px;left:14px;width:8px;height:8px;border-bottom:1px solid #C9A84C;border-left:1px solid #C9A84C;"></div>
-  <div style="position:absolute;bottom:14px;right:14px;width:8px;height:8px;border-bottom:1px solid #C9A84C;border-right:1px solid #C9A84C;"></div>
-
-  <!-- Content centered -->
-  <div style="
-    position:absolute; inset:0;
-    display:flex; flex-direction:column;
-    align-items:center; justify-content:center;
-    text-align:center; padding:0.2in;
-  ">
-    <div style="
-      font-family:'Playfair Display',Georgia,serif;
-      font-size:22px; font-weight:700;
-      color:#1A1A1A; letter-spacing:0.02em;
-    ">{u.name}</div>
-    <div style="
-      font-family:'Playfair Display',Georgia,serif;
-      font-size:9px; font-style:italic;
-      color:#6B1E2E; margin-top:4px; letter-spacing:0.06em;
-    ">{u.company_name}</div>
-
-    <!-- Gold ornament -->
-    <div style="
-      display:flex; align-items:center;
-      gap:8px; margin:10px 0;
-    ">
-      <div style="width:30px;height:0.5px;background:#C9A84C;"></div>
-      <div style="width:4px;height:4px;background:#C9A84C;transform:rotate(45deg);"></div>
-      <div style="width:30px;height:0.5px;background:#C9A84C;"></div>
-    </div>
-
-    <!-- Contact -->
-    <div style="
-      font-family:'DM Sans',Arial,sans-serif;
-      font-size:7px; color:#5C5249;
-      line-height:1.8; text-align:center;
-    ">
-      <div>{u.phone_number}</div>
-      {email}
-      {website}
-      <div>{u.address}</div>
-    </div>
-  </div>
-</div>"""
-
-
-def _render_tech_slate(u: UserInfo, s: dict) -> str:
-    email = f'<div>{u.email}</div>' if u.email else ""
-    website = f'<div>{u.website}</div>' if u.website else ""
-    return f"""
-<div style="
-  width:3.5in; height:2in;
-  background:#1A1F2E;
-  display:flex; overflow:hidden;
-  position:relative;
-">
-  <!-- Electric blue left stripe -->
-  <div style="width:6px; background:#4F8EF7; flex-shrink:0; height:100%;"></div>
-
-  <!-- Large faint background circle -->
-  <div style="
-    position:absolute; right:-40px; bottom:-40px;
-    width:160px; height:160px;
-    border-radius:50%;
-    border:1px solid rgba(79,142,247,0.12);
-    pointer-events:none;
-  "></div>
-  <div style="
-    position:absolute; right:-20px; bottom:-20px;
-    width:100px; height:100px;
-    border-radius:50%;
-    border:1px solid rgba(79,142,247,0.08);
-    pointer-events:none;
-  "></div>
-
-  <!-- Content -->
-  <div style="
-    flex:1; padding:0.2in 0.18in 0.18in 0.16in;
-    display:flex; flex-direction:column;
-    justify-content:space-between; position:relative; z-index:1;
-  ">
-    <!-- Name + Company -->
-    <div>
-      <div style="
-        font-family:'DM Sans',Arial,sans-serif;
-        font-size:20px; font-weight:700;
-        color:#FFFFFF; line-height:1.15; letter-spacing:-0.2px;
-      ">{u.name}</div>
-      <div style="
-        font-family:'DM Sans',Arial,sans-serif;
-        font-size:8px; font-weight:500;
-        color:#4F8EF7; letter-spacing:0.1em;
-        margin-top:5px;
-      ">{u.company_name}</div>
-    </div>
-
-    <!-- Blue divider -->
-    <div style="height:0.5px; background:rgba(79,142,247,0.35);"></div>
-
-    <!-- Contact -->
-    <div style="
-      font-family:'DM Sans',Arial,sans-serif;
-      font-size:7px; color:#94A3B8;
-      line-height:1.8; letter-spacing:0.01em;
-    ">
-      <div>{u.phone_number}</div>
-      {email}
-      {website}
-      <div>{u.address}</div>
-    </div>
-  </div>
-</div>"""
-
-
-def _render_bold_split(u: UserInfo, s: dict) -> str:
-    email = f'<div>{u.email}</div>' if u.email else ""
-    website = f'<div>{u.website}</div>' if u.website else ""
-    return f"""
-<div style="
-  width:3.5in; height:2in;
-  display:flex; flex-direction:column;
-  overflow:hidden; position:relative;
-">
-  <!-- White top half -->
-  <div style="
-    flex:1; background:#FFFFFF;
-    padding:0.18in 0.22in 0.1in;
-    display:flex; flex-direction:column;
-    justify-content:center;
-  ">
-    <div style="
-      font-family:'DM Sans',Arial,sans-serif;
-      font-size:22px; font-weight:800;
-      color:#1C1C1C; line-height:1.1;
-      letter-spacing:-0.3px;
-    ">{u.name}</div>
-    <div style="
-      font-family:'DM Sans',Arial,sans-serif;
-      font-size:8px; font-weight:600;
-      color:#D95F43; letter-spacing:0.12em;
-      text-transform:uppercase; margin-top:5px;
-    ">{u.company_name}</div>
-  </div>
-
-  <!-- Sharp divider -->
-  <div style="height:2px; background:#D95F43;"></div>
-
-  <!-- Coral bottom half -->
-  <div style="
-    flex:1; background:#D95F43;
-    padding:0.1in 0.22in 0.18in;
-    display:flex; flex-direction:column;
-    justify-content:center; position:relative; overflow:hidden;
-  ">
-    <!-- Subtle circle decoration -->
-    <div style="
-      position:absolute; right:-20px; bottom:-30px;
-      width:100px; height:100px; border-radius:50%;
-      background:rgba(255,255,255,0.08);
-    "></div>
-    <div style="
-      font-family:'DM Sans',Arial,sans-serif;
-      font-size:7px; color:rgba(255,255,255,0.92);
-      line-height:1.75; position:relative; z-index:1;
-    ">
-      <div>{u.phone_number}</div>
-      {email}
-      {website}
-      <div>{u.address}</div>
-    </div>
-  </div>
-</div>"""
-
-
-# ── Design Definitions ────────────────────────────────────────────────────────
-
-DESIGN_STYLES = [
-    {
-        "name": "Minimal Gold",
-        "theme": "minimal",
-        "description": "Off-white with single gold divider rule, Swiss precision, generous whitespace",
-        "font_family": "'Playfair Display', 'DM Sans', Georgia, sans-serif",
-        "font_url": "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap",
-        "primary_color": "#1A1A1A",
-        "accent_color": "#C9A84C",
-        "bg_color": "#F5F4F0",
-        "render": _render_minimal_gold,
-    },
-    {
-        "name": "Dark Executive",
-        "theme": "bold",
-        "description": "Matte black with gold border frame and metallic typography",
-        "font_family": "'Playfair Display', 'DM Sans', Georgia, sans-serif",
-        "font_url": "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap",
-        "primary_color": "#C9A84C",
-        "accent_color": "#C9A84C",
-        "bg_color": "#0A0A0A",
-        "render": _render_dark_executive,
-    },
-    {
-        "name": "Navy Corporate",
-        "theme": "corporate",
-        "description": "Deep navy with gold left accent bar, authoritative and professional",
-        "font_family": "'Playfair Display', 'DM Sans', Georgia, sans-serif",
-        "font_url": "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap",
-        "primary_color": "#C9A84C",
-        "accent_color": "#C9A84C",
-        "bg_color": "#0D2144",
-        "render": _render_navy_corporate,
-    },
-    {
-        "name": "Cream Luxury",
-        "theme": "elegant",
-        "description": "Warm cream with burgundy border, corner ornaments, centered layout",
-        "font_family": "'Playfair Display', 'DM Sans', Georgia, sans-serif",
-        "font_url": "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap",
-        "primary_color": "#1A1A1A",
-        "accent_color": "#C9A84C",
-        "bg_color": "#F4EFE4",
-        "render": _render_cream_luxury,
-    },
-    {
-        "name": "Tech Slate",
-        "theme": "tech",
-        "description": "Dark slate with electric blue accent stripe and geometric circles",
-        "font_family": "'DM Sans', Arial, sans-serif",
-        "font_url": "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap",
-        "primary_color": "#FFFFFF",
-        "accent_color": "#4F8EF7",
-        "bg_color": "#1A1F2E",
-        "render": _render_tech_slate,
-    },
-    {
-        "name": "Bold Split",
-        "theme": "creative",
-        "description": "White and coral color-block split, bold modern energy",
-        "font_family": "'DM Sans', Arial, sans-serif",
-        "font_url": "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;800&display=swap",
-        "primary_color": "#1C1C1C",
-        "accent_color": "#D95F43",
-        "bg_color": "#FFFFFF",
-        "render": _render_bold_split,
-    },
-]
-
-
-# ── Main Entry Point ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def generate_designs(user_info: UserInfo) -> list[CardDesign]:
     """
-    Generate 6 business card designs using HTML/CSS rendering.
-    Zero hallucination — text is injected directly from user data.
-    Instant generation — no external API calls.
-    Each design is a complete self-contained HTML document.
+    4-step pipeline:
+    1. Ideogram  → abstract style inspiration image (no text)
+    2. GPT Vision → extract color palette + mood from image
+    3. GPT-4o    → generate complete layout system JSON
+    4. HTML      → inject user text, render final print-ready card
     """
     designs = []
 
-    for style in DESIGN_STYLES:
-        try:
-            design_id = str(uuid.uuid4())
-            html = _render_html(user_info, style)
+    async with httpx.AsyncClient() as client:
+        for i, style in enumerate(STYLE_PROMPTS):
+            try:
+                print(f"\n{'='*55}")
+                print(f"[{i+1}/{len(STYLE_PROMPTS)}] {style['name']}")
+                print(f"{'='*55}")
 
-            design_style = DesignStyle(
-                theme=style["theme"],
-                primary_color=style["primary_color"],
-                secondary_color="#666666",
-                accent_color=style["accent_color"],
-                background_color=style["bg_color"],
-                text_color=style["primary_color"],
-                font_family=style["font_family"],
-                layout="classic",
-                design_name=style["name"],
-                description=style["description"],
-            )
+                # ── Step 1: Ideogram style image ──────────────────────────
+                print(f"  Step 1 → Ideogram: generating style inspiration...")
+                image_url = await _generate_ideogram_style(
+                    client, style["prompt"]
+                )
+                print(f"  ✓ Image: {image_url[:70]}...")
 
-            designs.append(CardDesign(
-                id=design_id,
-                style=design_style,
-                html_content=html,
-            ))
+                # ── Step 2: GPT Vision color extraction ───────────────────
+                print(f"  Step 2 → GPT Vision: extracting colors + mood...")
+                color_data = await _extract_colors_with_vision(image_url)
+                print(f"  ✓ Background: {color_data.get('background_color')}")
+                print(f"  ✓ Mood: {color_data.get('mood', '')[:60]}...")
 
-            print(f"✓ Generated: {style['name']}")
+                # ── Step 3: GPT-4o layout system ──────────────────────────
+                print(f"  Step 3 → GPT-4o: generating layout system...")
+                layout = await _generate_layout_with_gpt4o(
+                    user_info, color_data
+                )
+                print(f"  ✓ Layout: {layout.get('layout_name', 'unnamed')}")
+                print(f"  ✓ Elements: {len(layout.get('decorative_elements', []))} decorative")
 
-        except Exception as e:
-            print(f"✗ Failed: {style['name']} — {str(e)}")
-            continue
+                # ── Step 4: HTML rendering ────────────────────────────────
+                print(f"  Step 4 → HTML Renderer: building final card...")
+                html = _build_final_html(user_info, layout)
+                print(f"  ✓ HTML: {len(html)} chars rendered")
+
+                design_style = DesignStyle(
+                    theme=style["theme"],
+                    primary_color=layout.get("name_section", {}).get("color", "#1A1A1A"),
+                    secondary_color=layout.get("company_section", {}).get("color", "#666666"),
+                    accent_color=color_data.get("accent_color", "#C9A84C"),
+                    background_color=layout.get("background_color", "#FFFFFF"),
+                    text_color=layout.get("name_section", {}).get("color", "#1A1A1A"),
+                    font_family=layout.get("name_section", {}).get("font_family", "Playfair Display"),
+                    layout=style["theme"],
+                    design_name=style["name"],
+                    description=style["description"],
+                )
+
+                designs.append(CardDesign(
+                    id=str(uuid.uuid4()),
+                    style=design_style,
+                    html_content=html,
+                ))
+
+                print(f"  ✓ Design {i+1} complete!")
+
+            except Exception as e:
+                print(f"  ✗ Design {i+1} failed ({style['name']}): {str(e)}")
+                continue
 
     if len(designs) == 0:
         raise ValueError("All design generations failed.")
 
-    print(f"✓ Generated {len(designs)}/6 designs")
+    print(f"\n✓ Pipeline complete: {len(designs)}/{len(STYLE_PROMPTS)} designs generated")
     return designs
