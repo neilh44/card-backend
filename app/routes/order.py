@@ -9,12 +9,6 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 
 @router.post("/", response_model=OrderResponse)
 async def create_order(payload: CreateOrderRequest):
-    """
-    Create a print-ready order:
-    1. Render PDF (Pillow free / Playwright premium)
-    2. Upload PDF to Supabase Storage
-    3. Save order record to database
-    """
     order_id = str(uuid.uuid4())
     clean_html = payload.design_html.strip()
 
@@ -74,46 +68,25 @@ async def create_order(payload: CreateOrderRequest):
     )
 
 
-# ── IMPORTANT: Specific routes MUST come before /{order_id} wildcard ─────────
-
 @router.post("/{order_id}/print-sheet")
 async def generate_print_sheet(order_id: str):
-    """
-    Generate a 12x18 inch print-ready sheet PDF.
-    3 columns x 8 rows = 24 business cards with cut marks.
-    MUST be defined before GET /{order_id} to avoid route collision.
-    """
     order = await storage_service.get_order(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
     design_html = order.get("design_html", "")
     if not design_html:
-        raise HTTPException(
-            status_code=400,
-            detail="No card HTML found in this order. Please recreate the order."
-        )
+        raise HTTPException(status_code=400, detail="No card HTML found. Please recreate the order.")
 
     try:
-        local_path = await render_service.generate_print_sheet(
-            design_html, order_id
-        )
+        local_path = await render_service.generate_print_sheet(design_html, order_id)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Print sheet generation failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Print sheet failed: {str(e)}")
 
     try:
-        sheet_url = await storage_service.upload_pdf(
-            local_path,
-            f"{order_id}_print_sheet"
-        )
+        sheet_url = await storage_service.upload_pdf(local_path, f"{order_id}_print_sheet")
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Print sheet upload failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
     return {
         "order_id": order_id,
@@ -127,11 +100,8 @@ async def generate_print_sheet(order_id: str):
     }
 
 
-# ── Wildcard route MUST be last ───────────────────────────────────────────────
-
 @router.get("/{order_id}", response_model=GetOrderResponse)
 async def get_order(order_id: str):
-    """Fetch a specific order by ID."""
     order = await storage_service.get_order(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
